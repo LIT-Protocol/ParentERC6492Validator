@@ -6,8 +6,9 @@
   "types": "dist/index.d.ts",
   "scripts": {
     "build": "tsc",
+    "build:contracts": "forge build",
     "test": "forge test -vv",
-    "test:ts": "tsx src/__tests__/multichain.test.ts"
+    "test:e2e": "tsx src/__tests__/e2e.test.ts"
   },
   "keywords": [
     "kernel",
@@ -19,7 +20,12 @@
   "author": "",
   "license": "MIT",
   "dependencies": {
+    "@zerodev/ecdsa-validator": "^5.4.4",
+    "@zerodev/permissions": "^5.4.7",
+    "@zerodev/sdk": "^5.4.5",
+    "dotenv": "^16.4.7",
     "merkletreejs": "^0.4.0",
+    "permissionless": "^0.2.23",
     "viem": "^2.21.0"
   },
   "devDependencies": {

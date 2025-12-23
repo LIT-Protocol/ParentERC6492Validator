@@ -37,7 +37,8 @@ export interface DeploymentResult {
 export async function deployValidator(
   config: DeploymentConfig
 ): Promise<DeploymentResult> {
-  const { chain, rpcUrl, account, salt = "0x0000000000000000000000000000000000000000000000000000000000000001" } = config;
+  const { chain, rpcUrl, account } = config;
+  // Note: salt is reserved for future CREATE2 deployment support
 
   const publicClient = createPublicClient({
     chain,
