@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+zerodev-sdk/
+
+# Build outputs
+dist/
+out/
+cache/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Foundry
+broadcast/
+cache_forge/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Test coverage
+coverage/
+lcov.info

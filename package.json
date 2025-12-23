@@ -1,0 +1,30 @@
+{
+  "name": "parent-erc6492-validator",
+  "version": "1.0.0",
+  "description": "Kernel v3.3 validator module for multi-chain ERC-6492 parent account approvals",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "forge test -vv",
+    "test:ts": "tsx src/__tests__/multichain.test.ts"
+  },
+  "keywords": [
+    "kernel",
+    "erc-4337",
+    "erc-6492",
+    "smart-account",
+    "validator"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "merkletreejs": "^0.4.0",
+    "viem": "^2.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
