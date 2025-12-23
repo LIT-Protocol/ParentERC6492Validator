@@ -38,3 +38,14 @@ export {
   encodeInstallData,
   deployValidatorMultiChain,
 } from "./deploy.js";
+
+export {
+  // Types
+  type ParentValidatorConfig,
+  type ParentValidator,
+  type MultiChainApprovalParams as ValidatorMultiChainApprovalParams,
+  type MultiChainApprovalResult as ValidatorMultiChainApprovalResult,
+  // Functions
+  toParentValidator,
+  createMultiChainApproval,
+} from "./toParentValidator.js";
