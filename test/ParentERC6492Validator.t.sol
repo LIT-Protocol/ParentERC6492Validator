@@ -29,7 +29,8 @@ contract ParentERC6492ValidatorTest is Test {
         parentPrivateKey = 0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef;
         parentEOA = vm.addr(parentPrivateKey);
         childAccount = makeAddr("child");
-        entryPoint = makeAddr("entryPoint");
+        // Must use the actual EntryPoint v0.7 address since the contract uses it as a constant
+        entryPoint = 0x0000000071727De22E5E9d8BAf0edAc6f37da032;
 
         // Install the validator on the child account
         vm.prank(childAccount);

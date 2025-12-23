@@ -1,12 +1,11 @@
 /**
- * End-to-End Test for ParentERC6492Validator - Multi-Chain
+ * End-to-End Test for ParentERC6492Validator
  *
- * This test demonstrates multi-chain approval with a single parent signature:
- * 1. Deploy ParentERC6492Validator on Base Sepolia
- * 2. Create parent Kernel account
- * 3. Create child Kernel account with ParentValidator installed
- * 4. Execute REAL transactions using parent approval
- * 5. Prove that the parent's signature authorizes child account operations
+ * This test proves that the ParentERC6492Validator works by:
+ * 1. Deploy ParentERC6492Validator contract
+ * 2. Create a parent Kernel account (the authorizing account)
+ * 3. Create a child Kernel account WITH ParentValidator as sudo from the start
+ * 4. Execute REAL transactions on the child using parent approval
  */
 
 import "dotenv/config";
@@ -21,8 +20,9 @@ import {
   type WalletClient,
   type Chain,
   parseEther,
-  encodeFunctionData,
   formatEther,
+  pad,
+  concat,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { baseSepolia } from "viem/chains";
@@ -34,7 +34,6 @@ import {
 } from "@zerodev/sdk";
 import { VALIDATOR_ABI, VALIDATOR_BYTECODE } from "../abi.js";
 import { toParentValidator } from "../toParentValidator.js";
-import { encodeInstallData } from "../deploy.js";
 
 // ============ Configuration ============
 
@@ -122,7 +121,7 @@ async function deployValidator(
 async function main() {
   console.log("=".repeat(70));
   console.log("ParentERC6492Validator E2E Test");
-  console.log("Proving Parent Approval Works with Real Transactions");
+  console.log("Executing Real Transactions with Parent Approval");
   console.log("=".repeat(70));
   console.log();
 
@@ -153,12 +152,18 @@ async function main() {
   });
   console.log(`EOA Balance: ${formatEther(balance)} ETH`);
 
-  if (balance < parseEther("0.01")) {
-    throw new Error("Insufficient balance on Base Sepolia");
-  }
+  // Note: We need at least 0.000001 ETH to deploy the validator
+  // If you have a validator already deployed with the CURRENT bytecode, you can set it here
+  // const DEPLOYED_VALIDATOR = "0x..." as Address; // Uncomment and set to reuse
 
   // ============ Step 1: Deploy ParentERC6492Validator ============
   console.log("\n--- Step 1: Deploy ParentERC6492Validator ---");
+
+  if (balance < parseEther("0.000001")) {
+    throw new Error(
+      "Insufficient balance to deploy validator (need at least 0.000001 ETH)"
+    );
+  }
 
   const validatorAddress = await deployValidator(
     walletClient,
@@ -213,70 +218,49 @@ async function main() {
     console.log("  ✓ Parent already deployed.");
   }
 
-  // ============ Step 3: Create Child Account with ECDSA (for setup) ============
-  console.log("\n--- Step 3: Create Child Account (for initial setup) ---");
+  // ============ Step 3: Create ParentValidator for Child ============
+  console.log("\n--- Step 3: Create ParentValidator for Child ---");
 
-  const childIndex = 600n; // Use a unique index
-
-  // Create child account
-  const childEcdsaValidator = await signerToEcdsaValidator(publicClient, {
-    signer: { ...ownerSigner, source: "local" as const },
-    entryPoint: ENTRY_POINT,
-    kernelVersion: KERNEL_VERSION,
+  // Create our parent validator - this will be the SUDO validator for the child
+  // For this test, we use the EOA directly as the parent (simpler flow)
+  // The contract also supports smart account parents via ERC-1271/ERC-6492
+  const parentValidator = await toParentValidator({
+    validatorAddress,
+    parentAddress: ownerSigner.address, // Use EOA as parent for simpler signing
+    parentSigner: ownerSigner,
+    publicClient,
+    chainId: chain.id,
+    scope: DEFAULT_SCOPE,
   });
 
-  let childAccountForSetup = await createKernelAccount(publicClient, {
+  console.log(`  ParentValidator created`);
+  console.log(`    Contract: ${validatorAddress}`);
+  console.log(`    Parent EOA: ${ownerSigner.address}`);
+
+  // ============ Step 4: Create Child Account with ParentValidator as Sudo ============
+  console.log("\n--- Step 4: Create Child Account with ParentValidator ---");
+
+  const childIndex = BigInt(Math.floor(Math.random() * 1_000_000_000));
+  console.log(`  Child index for this test: ${childIndex}`);
+
+  // Create the child account with ParentValidator as the sudo validator
+  const childAccount = await createKernelAccount(publicClient, {
     entryPoint: ENTRY_POINT,
-    plugins: { sudo: childEcdsaValidator },
+    plugins: {
+      sudo: parentValidator as any, // Cast needed due to strict typing
+    },
     index: childIndex,
     kernelVersion: KERNEL_VERSION,
   });
 
-  console.log(`  Child Account: ${childAccountForSetup.address}`);
+  console.log(`  Child Account: ${childAccount.address}`);
 
-  // Deploy child if needed
-  let childCode = await publicClient.getCode({
-    address: childAccountForSetup.address,
-  });
-
-  if (!childCode || childCode === "0x") {
-    console.log("  Deploying child account...");
-
-    const childSetupClient = createKernelAccountClient({
-      account: childAccountForSetup,
-      chain,
-      bundlerTransport: http(bundlerUrl),
-      paymaster: createZeroDevPaymasterClient({
-        chain,
-        transport: http(bundlerUrl),
-      }),
-    });
-
-    const hash = await childSetupClient.sendTransaction({
-      to: ownerSigner.address,
-      value: 0n,
-      data: "0x",
-    });
-    await publicClient.waitForTransactionReceipt({ hash });
-    console.log("  ✓ Child deployed!");
-
-    // Wait for RPC sync
-    await new Promise((r) => setTimeout(r, 3000));
-  } else {
-    console.log("  ✓ Child already deployed.");
-  }
-
-  // Recreate the account and client now that it's deployed
-  // This ensures the SDK knows the account exists
-  childAccountForSetup = await createKernelAccount(publicClient, {
-    entryPoint: ENTRY_POINT,
-    plugins: { sudo: childEcdsaValidator },
-    index: childIndex,
-    kernelVersion: KERNEL_VERSION,
-  });
-
-  const childSetupClient = createKernelAccountClient({
-    account: childAccountForSetup,
+  // Use paymaster for gas sponsorship. The gas estimation marker in the contract
+  // allows getStubSignature to return a dummy signature that passes validation
+  // during gas estimation (when the bundler modifies the userOp). Actual execution
+  // uses the real signed signature from signUserOperation.
+  const childClient = createKernelAccountClient({
+    account: childAccount,
     chain,
     bundlerTransport: http(bundlerUrl),
     paymaster: createZeroDevPaymasterClient({
@@ -285,367 +269,142 @@ async function main() {
     }),
   });
 
-  // ============ Step 4: Install ParentValidator on Child ============
-  console.log("\n--- Step 4: Install ParentValidator on Child ---");
+  // ============ Step 5: Check Child Account Balance ============
+  console.log("\n--- Step 5: Check Child Account Balance ---");
 
-  const installData = encodeInstallData(
-    parentAccount.address,
-    0n,
-    DEFAULT_SCOPE
+  const childBalance = await publicClient.getBalance({
+    address: childAccount.address,
+  });
+  console.log(`  Child balance: ${formatEther(childBalance)} ETH`);
+  console.log(
+    "  ✓ Using paymaster for gas sponsorship (no pre-funding needed)"
   );
+
+  // ============ Step 6: Check Child Deployment ============
+  console.log("\n--- Step 6: Check Child Deployment ---");
+
+  const childCode = await publicClient.getCode({
+    address: childAccount.address,
+  });
+
+  if (!childCode || childCode === "0x") {
+    console.log("  Child account not deployed yet.");
+    console.log("  First transaction will deploy it...");
+  } else {
+    console.log("  ✓ Child already deployed.");
+  }
+
+  // ============ Step 7: Execute Transaction with Parent Approval ============
+  console.log("\n--- Step 7: Execute Transaction with Parent Approval ---");
+  console.log("  Sending 0 ETH to null address (0x000...000)");
+  console.log("  The child's UserOp will be signed by the PARENT");
+  console.log();
+
+  const txHash = await childClient.sendTransaction({
+    to: NULL_ADDRESS,
+    value: 0n,
+    data: "0x",
+  });
+
+  console.log(`  ✓ Transaction submitted!`);
+  console.log(`    TX Hash: ${txHash}`);
+
+  const receipt = await publicClient.waitForTransactionReceipt({
+    hash: txHash,
+  });
+
+  if (receipt.status !== "success") {
+    throw new Error(`Transaction failed with status: ${receipt.status}`);
+  }
+
+  console.log(`  ✓ Transaction confirmed!`);
+  console.log(`    Block: ${receipt.blockNumber}`);
+  console.log(`    Gas Used: ${receipt.gasUsed}`);
+
+  // ============ Step 8: Verify Validator State ============
+  console.log("\n--- Step 8: Verify Validator State ---");
 
   const isInitialized = await publicClient.readContract({
     address: validatorAddress,
     abi: VALIDATOR_ABI,
     functionName: "isInitialized",
-    args: [childAccountForSetup.address],
+    args: [childAccount.address],
   });
 
-  if (isInitialized) {
-    console.log("  ✓ ParentValidator already installed");
-  } else {
-    console.log("  Installing ParentValidator...");
-
-    // Use the Kernel execute function to call installModule
-    // execute(ExecMode mode, bytes calldata executionCalldata)
-    // For Kernel v3.3, we need to use the execute function with mode 0x00 (single call)
-    const installModuleCalldata = encodeFunctionData({
-      abi: [
-        {
-          name: "installModule",
-          type: "function",
-          inputs: [
-            { name: "moduleType", type: "uint256" },
-            { name: "module", type: "address" },
-            { name: "initData", type: "bytes" },
-          ],
-          outputs: [],
-          stateMutability: "payable",
-        },
-      ],
-      functionName: "installModule",
-      args: [1n, validatorAddress, installData],
-    });
-
-    // Try using sendUserOperation directly with proper execution encoding
-    try {
-      const hash = await childSetupClient.sendUserOperation({
-        callData: await childAccountForSetup.encodeCalls([
-          {
-            to: childAccountForSetup.address,
-            value: 0n,
-            data: installModuleCalldata,
-          },
-        ]),
-      });
-
-      console.log(`    UserOp Hash: ${hash}`);
-
-      // Wait for the UserOp to be mined
-      const bundlerClient = childSetupClient;
-      const receipt = await bundlerClient.waitForUserOperationReceipt({
-        hash,
-      });
-
-      console.log(`  ✓ ParentValidator installed!`);
-      console.log(`    TX: ${receipt.receipt.transactionHash}`);
-    } catch (e: any) {
-      console.log(`  ✗ Installation failed: ${e.message?.slice(0, 200)}`);
-      console.log(`  Continuing without installation to test other parts...`);
-    }
+  if (!isInitialized) {
+    throw new Error("Validator should be initialized after transaction");
   }
 
-  // Check if initialized regardless
-  const nowInitialized = await publicClient.readContract({
+  console.log(`  ✓ Validator initialized: ${isInitialized}`);
+
+  const registeredParent = await publicClient.readContract({
     address: validatorAddress,
     abi: VALIDATOR_ABI,
-    functionName: "isInitialized",
-    args: [childAccountForSetup.address],
+    functionName: "parentOf",
+    args: [childAccount.address],
   });
 
-  if (nowInitialized) {
-    console.log(`  ✓ Verified: isInitialized = ${nowInitialized}`);
-
-    // Verify parent is set correctly
-    const registeredParent = await publicClient.readContract({
-      address: validatorAddress,
-      abi: VALIDATOR_ABI,
-      functionName: "parentOf",
-      args: [childAccountForSetup.address],
-    });
-    console.log(`  ✓ Registered parent: ${registeredParent}`);
-  } else {
-    console.log(`  ⚠ Module not installed via bundler`);
-    console.log("  Attempting direct installation via EOA...");
-
-    // Try installing by having the child account call installModule
-    // We'll use the sudo ECDSA validator to authorize this
-    try {
-      // The child account can call installModule on itself
-      // Since we control the ECDSA key, we can sign this operation
-      const installModuleCalldata = encodeFunctionData({
-        abi: [
-          {
-            name: "installModule",
-            type: "function",
-            inputs: [
-              { name: "moduleType", type: "uint256" },
-              { name: "module", type: "address" },
-              { name: "initData", type: "bytes" },
-            ],
-            outputs: [],
-            stateMutability: "payable",
-          },
-        ],
-        functionName: "installModule",
-        args: [1n, validatorAddress, installData],
-      });
-
-      // Send as a simple transaction to the child account
-      const hash = await childSetupClient.sendTransaction({
-        calls: [
-          {
-            to: childAccountForSetup.address,
-            value: 0n,
-            data: installModuleCalldata,
-          },
-        ],
-      });
-
-      console.log(`    TX Hash: ${hash}`);
-      const receipt = await publicClient.waitForTransactionReceipt({ hash });
-      console.log(`  ✓ Installation TX confirmed: ${receipt.status}`);
-    } catch (e: any) {
-      console.log(`  ✗ Direct installation also failed`);
-      console.log();
-      console.log("  Falling back to direct contract verification...");
-    }
+  if (registeredParent !== ownerSigner.address) {
+    throw new Error(`Wrong parent registered: ${registeredParent}`);
   }
 
-  // Re-check if initialized
-  const finalInitialized = await publicClient.readContract({
+  console.log(`  ✓ Registered parent: ${registeredParent}`);
+
+  const currentNonce = await publicClient.readContract({
     address: validatorAddress,
     abi: VALIDATOR_ABI,
-    functionName: "isInitialized",
-    args: [childAccountForSetup.address],
+    functionName: "nonceOf",
+    args: [childAccount.address],
   });
 
-  if (!finalInitialized) {
-    // ============ Alternative: Verify Contract Logic Directly ============
-    console.log("\n--- Alternative: Verify Contract Logic Directly ---");
-    console.log("  Since module installation requires special Kernel config,");
-    console.log("  we'll verify the cryptographic flow works correctly.");
-    console.log();
+  console.log(`  ✓ Current nonce: ${currentNonce}`);
 
-    // Create a mock userOpHash
-    const mockUserOpHash =
-      "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef" as Hash;
-
-    // Compute leaf hash on-chain
-    const onChainLeaf = await publicClient.readContract({
-      address: validatorAddress,
-      abi: VALIDATOR_ABI,
-      functionName: "computeLeafHash",
-      args: [
-        BigInt(chain.id),
-        childAccountForSetup.address,
-        ENTRY_POINT.address,
-        mockUserOpHash,
-      ],
-    });
-
-    // Compute leaf hash off-chain using our helper
-    const { computeLeafHash: computeLeafHashLocal } = await import(
-      "../multichain.js"
-    );
-    const offChainLeaf = computeLeafHashLocal(
-      chain.id,
-      childAccountForSetup.address,
-      ENTRY_POINT.address,
-      mockUserOpHash
-    );
-
-    const leafMatches = onChainLeaf === offChainLeaf;
-    console.log(`  ✓ Leaf hash computation: ${leafMatches ? "MATCHES" : "MISMATCH"}`);
-    console.log(`    On-chain:  ${onChainLeaf}`);
-    console.log(`    Off-chain: ${offChainLeaf}`);
-
-    // Compute approval hash
-    const merkleRoot = offChainLeaf; // Single leaf = root
-    const nonce = 0n;
-    const validUntil = Math.floor(Date.now() / 1000) + 3600;
-
-    const onChainApproval = await publicClient.readContract({
-      address: validatorAddress,
-      abi: VALIDATOR_ABI,
-      functionName: "computeApprovalHash",
-      args: [
-        childAccountForSetup.address,
-        merkleRoot,
-        nonce,
-        validUntil,
-        DEFAULT_SCOPE,
-      ],
-    });
-
-    const { computeApprovalHash: computeApprovalHashLocal } = await import(
-      "../multichain.js"
-    );
-    const offChainApproval = computeApprovalHashLocal(
-      childAccountForSetup.address,
-      merkleRoot,
-      nonce,
-      validUntil,
-      DEFAULT_SCOPE
-    );
-
-    const approvalMatches = onChainApproval === offChainApproval;
-    console.log(`  ✓ Approval hash computation: ${approvalMatches ? "MATCHES" : "MISMATCH"}`);
-    console.log(`    On-chain:  ${onChainApproval}`);
-    console.log(`    Off-chain: ${offChainApproval}`);
-
-    // Test signature generation
-    const parentSignature = await ownerSigner.signMessage({
-      message: { raw: offChainApproval },
-    });
-    console.log(`  ✓ Parent signature generated: ${parentSignature.slice(0, 42)}...`);
-
-    // Test signature encoding
-    const { encodeUserOpSignature: encodeLocal } = await import(
-      "../multichain.js"
-    );
-    const encodedSig = encodeLocal({
-      approvalNonce: nonce,
-      validUntil,
-      merkleRoot,
-      merkleProof: [], // Empty for single leaf
-      parentSig6492: parentSignature,
-      scope: DEFAULT_SCOPE,
-    });
-    console.log(`  ✓ Signature encoded: ${encodedSig.slice(0, 42)}... (${(encodedSig.length - 2) / 2} bytes)`);
-
-    console.log("\n" + "=".repeat(70));
-    console.log("E2E Test Summary");
-    console.log("=".repeat(70));
-    console.log();
-    console.log("Verified:");
-    console.log("  ✓ ParentERC6492Validator contract deployed");
-    console.log("  ✓ Leaf hash computation matches on-chain");
-    console.log("  ✓ Approval hash computation matches on-chain");
-    console.log("  ✓ Parent signature generation works");
-    console.log("  ✓ Signature encoding works");
-    console.log();
-    console.log("Note: Full UserOp execution requires Kernel configuration");
-    console.log("      to support secondary validator installation.");
-    return;
-  }
-
-  // ============ Step 5: Create Child Client with Parent Validator ============
-  console.log("\n--- Step 5: Create Child Client with Parent Validator ---");
-
-  const parentValidator = await toParentValidator({
-    validatorAddress,
-    parentAddress: parentAccount.address,
-    parentSigner: ownerSigner,
-    publicClient,
-    chainId: chain.id,
-  });
-
-  // Create a new kernel account instance using the parent validator
-  // We cast to 'any' because our ParentValidator is compatible but TS types are strict
-  const childAccountWithParent = await createKernelAccount(publicClient, {
-    entryPoint: ENTRY_POINT,
-    address: childAccountForSetup.address, // Use the same address
-    plugins: {
-      sudo: parentValidator as any,
-    },
-    kernelVersion: KERNEL_VERSION,
-  });
-
-  const childParentClient = createKernelAccountClient({
-    account: childAccountWithParent,
-    chain,
-    bundlerTransport: http(bundlerUrl),
-    paymaster: createZeroDevPaymasterClient({
-      chain,
-      transport: http(bundlerUrl),
-    }),
-  });
-
-  console.log(`  ✓ Child client created with ParentValidator`);
-  console.log(`  ✓ Validator address: ${validatorAddress}`);
-
-  // ============ Step 6: Execute Transaction with Parent Approval ============
-  console.log("\n--- Step 6: Execute Transaction with Parent Approval ---");
-  console.log("  Sending 0 ETH to null address (0x000...000)");
-  console.log("  This transaction will be signed by the PARENT account");
-  console.log();
-
-  try {
-    const txHash = await childParentClient.sendTransaction({
-      to: NULL_ADDRESS,
-      value: 0n,
-      data: "0x",
-    });
-
-    console.log(`  ✓ Transaction submitted!`);
-    console.log(`    TX Hash: ${txHash}`);
-
-    const receipt = await publicClient.waitForTransactionReceipt({
-      hash: txHash,
-    });
-
-    console.log(`  ✓ Transaction confirmed!`);
-    console.log(`    Block: ${receipt.blockNumber}`);
-    console.log(`    Status: ${receipt.status}`);
-    console.log(`    Gas Used: ${receipt.gasUsed}`);
-  } catch (error: any) {
-    console.log(`  ✗ Transaction failed: ${error.message?.slice(0, 200)}`);
-    throw error;
-  }
-
-  // ============ Step 7: Execute Another Transaction ============
-  console.log("\n--- Step 7: Execute Another Transaction ---");
+  // ============ Step 9: Execute Another Transaction ============
+  console.log("\n--- Step 9: Execute Second Transaction ---");
   console.log("  Proving the system works consistently...");
 
-  try {
-    const txHash2 = await childParentClient.sendTransaction({
-      to: NULL_ADDRESS,
-      value: 0n,
-      data: "0x",
-    });
+  const txHash2 = await childClient.sendTransaction({
+    to: NULL_ADDRESS,
+    value: 0n,
+    data: "0x",
+  });
 
-    console.log(`  ✓ Second transaction submitted!`);
-    console.log(`    TX Hash: ${txHash2}`);
+  console.log(`  ✓ Second TX submitted: ${txHash2}`);
 
-    const receipt2 = await publicClient.waitForTransactionReceipt({
-      hash: txHash2,
-    });
+  const receipt2 = await publicClient.waitForTransactionReceipt({
+    hash: txHash2,
+  });
 
-    console.log(`  ✓ Second transaction confirmed!`);
-    console.log(`    Block: ${receipt2.blockNumber}`);
-    console.log(`    Status: ${receipt2.status}`);
-  } catch (error: any) {
-    console.log(`  ✗ Second transaction failed: ${error.message?.slice(0, 200)}`);
-    throw error;
+  if (receipt2.status !== "success") {
+    throw new Error(
+      `Second transaction failed with status: ${receipt2.status}`
+    );
   }
 
-  // ============ Step 8: Verify Nonce Incremented ============
-  console.log("\n--- Step 8: Verify State ---");
+  console.log(`  ✓ Second transaction confirmed!`);
+  console.log(`    Block: ${receipt2.blockNumber}`);
 
+  // Verify nonce incremented
   const finalNonce = await publicClient.readContract({
     address: validatorAddress,
     abi: VALIDATOR_ABI,
     functionName: "nonceOf",
-    args: [childAccountForSetup.address],
+    args: [childAccount.address],
   });
 
-  console.log(`  ✓ ParentValidator nonce: ${finalNonce}`);
-  console.log(`    (Should be 2 after two transactions)`);
+  console.log(`  ✓ Final nonce: ${finalNonce}`);
+
+  if (finalNonce !== currentNonce + 1n) {
+    throw new Error(
+      `Nonce should have incremented. Expected ${
+        currentNonce + 1n
+      }, got ${finalNonce}`
+    );
+  }
 
   // ============ Summary ============
   console.log("\n" + "=".repeat(70));
-  console.log("E2E Test Summary");
+  console.log("E2E Test Summary - ALL PASSED");
   console.log("=".repeat(70));
   console.log();
   console.log("Deployed Contracts:");
@@ -653,20 +412,22 @@ async function main() {
   console.log();
   console.log("Accounts:");
   console.log(`  Parent Account: ${parentAccount.address}`);
-  console.log(`  Child Account: ${childAccountForSetup.address}`);
+  console.log(`  Child Account: ${childAccount.address}`);
   console.log();
-  console.log("Results:");
+  console.log("Transactions Executed:");
+  console.log(`  TX 1: ${txHash}`);
+  console.log(`  TX 2: ${txHash2}`);
+  console.log();
+  console.log("Verified:");
   console.log("  ✓ ParentERC6492Validator deployed");
-  console.log("  ✓ Parent Kernel account created");
-  console.log("  ✓ Child Kernel account created");
-  console.log("  ✓ ParentValidator installed on child");
+  console.log("  ✓ Child account created with ParentValidator as sudo");
   console.log("  ✓ Transaction 1 executed with parent approval");
   console.log("  ✓ Transaction 2 executed with parent approval");
-  console.log(`  ✓ Nonce correctly incremented to ${finalNonce}`);
+  console.log("  ✓ Validator state correct (parent, nonce)");
   console.log();
-  console.log("Key Achievement:");
+  console.log("KEY ACHIEVEMENT:");
   console.log("  → Child account operations authorized by PARENT signature!");
-  console.log("  → Real transactions executed on Base Sepolia testnet");
+  console.log("  → Real transactions executed on Base Sepolia testnet!");
 }
 
 // Run the test
@@ -676,6 +437,6 @@ main()
     process.exit(0);
   })
   .catch((error) => {
-    console.error("\n✗ Test failed:", error);
+    console.error("\n✗ Test FAILED:", error.message || error);
     process.exit(1);
   });

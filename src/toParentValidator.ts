@@ -8,15 +8,12 @@ import {
   type Hex,
   type Hash,
   type PublicClient,
-  encodePacked,
   encodeAbiParameters,
+  encodePacked,
   parseAbiParameters,
   keccak256,
 } from "viem";
-import {
-  type UserOperation,
-  getUserOperationHash,
-} from "viem/account-abstraction";
+import { type UserOperation, getUserOperationHash } from "viem/account-abstraction";
 import { toAccount, type LocalAccount } from "viem/accounts";
 import { getChainId, signMessage } from "viem/actions";
 import { VALIDATOR_ABI } from "./abi.js";
@@ -190,7 +187,7 @@ export async function toParentValidator(
       const childAddress = userOperation.sender;
       const opChainId = userOperation.chainId ?? chainId;
 
-      // Get the UserOp hash as computed by EntryPoint
+      // Get the UserOp hash as computed by EntryPoint v0.7
       const userOpHash = getUserOperationHash({
         userOperation: {
           ...userOperation,
@@ -250,19 +247,20 @@ export async function toParentValidator(
     },
 
     async getStubSignature(_userOperation: UserOperation): Promise<Hex> {
-      // Return a dummy signature for gas estimation
-      // The signature structure must match what the contract expects
-      const dummySig =
-        "0xfffffffffffffffffffffffffffffff0000000000000000000000000000000007aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1c" as Hex;
-      const dummyRoot =
-        "0x0000000000000000000000000000000000000000000000000000000000000001" as Hash;
+      // For gas estimation, we use a special marker that the contract recognizes.
+      // This is necessary because the bundler modifies the userOp (gas prices, etc.)
+      // after getStubSignature is called, which changes the userOpHash.
+      // The contract detects this marker and returns success without validation.
+      // Actual execution uses signUserOperation which computes the correct signature.
+      const GAS_ESTIMATION_MARKER = "0x67617365737469670000000000000000000000000000000000000000000000ff" as Hash;
+      const dummySig = "0x" + "00".repeat(65); // Dummy 65-byte signature
 
       return encodeUserOpSignature({
         approvalNonce: 0n,
         validUntil: Math.floor(Date.now() / 1000) + 3600,
-        merkleRoot: dummyRoot,
+        merkleRoot: GAS_ESTIMATION_MARKER, // This tells the contract it's gas estimation
         merkleProof: [],
-        parentSig6492: dummySig,
+        parentSig6492: dummySig as Hex,
         scope,
       });
     },
