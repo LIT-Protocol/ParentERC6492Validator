@@ -1,6 +1,5 @@
 # Dependencies
 node_modules/
-zerodev-sdk/
 
 # Build outputs
 dist/
